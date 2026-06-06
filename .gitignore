@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/
+.venv/
+
+# Data
+data/raw/
+data/processed/
+*.csv
+*.db
+
+# Models
+*.pkl
+*.pt
+*.faiss
+
+# Node
+frontend/node_modules/
+frontend/.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
