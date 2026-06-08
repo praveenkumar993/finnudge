@@ -1,6 +1,6 @@
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-
+import random
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -9,10 +9,10 @@ from datetime import datetime
 import sqlite3
 import json
 import numpy as np
-
 from backend.app.services.recommender import recommender
 from backend.app.services.online_learner import online_learner
 from backend.app.core.config import settings
+from backend.app.services.ab_testing import ab_testing
 
 app = FastAPI(
     title="FinNudge API",
@@ -63,10 +63,35 @@ def recommend(req: RecommendRequest):
     if not recommender.is_loaded:
         raise HTTPException(503, "model not loaded yet")
 
-    result = recommender.recommend(req.user_id, req.top_k)
-    recommender.log_event(
-        req.user_id, "none", "impression", "treatment"
+    ab_group = ab_testing.assign_group(req.user_id)
+
+    if ab_group == "treatment":
+        result = recommender.recommend(req.user_id, req.top_k)
+    else:
+        # control group gets random nudges
+        all_nudges = recommender.get_all_nudges()
+        sample     = random.sample(all_nudges,
+                                   req.top_k or settings.TOP_K)
+        result = {
+            "user_id":    req.user_id,
+            "archetype":  "unknown",
+            "nudges": [{
+                "rank":        i + 1,
+                "nudge_id":    n["nudge_id"],
+                "title":       n["title"],
+                "archetype":   n["archetype"],
+                "category":    n["category"],
+                "score":       0.5,
+                "explanation": "Showing available nudges",
+            } for i, n in enumerate(sample)],
+            "latency_ms": 0,
+            "source":     "control_random",
+        }
+
+    ab_testing.log_event(
+        req.user_id, "none", "impression", ab_group
     )
+    result["ab_group"] = ab_group
     return result
 
 
@@ -208,3 +233,13 @@ def get_user(user_id: str):
         "city":      user["city"],
         "age":       user["age"],
     }
+
+@app.get("/abtest/results")
+def abtest_results():
+    return ab_testing.get_results()
+
+
+@app.get("/abtest/assign/{user_id}")
+def abtest_assign(user_id: str):
+    group = ab_testing.assign_group(user_id)
+    return {"user_id": user_id, "ab_group": group}
