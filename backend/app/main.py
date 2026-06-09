@@ -66,7 +66,7 @@ def recommend(req: RecommendRequest):
     ab_group = ab_testing.assign_group(req.user_id)
 
     if ab_group == "treatment":
-        result = recommender.recommend(req.user_id, req.top_k)
+        result = recommender.recommend(req.user_id, req.top_k,req.current_action or "opened_app")
     else:
         # control group gets random nudges
         all_nudges = recommender.get_all_nudges()
@@ -243,3 +243,42 @@ def abtest_results():
 def abtest_assign(user_id: str):
     group = ab_testing.assign_group(user_id)
     return {"user_id": user_id, "ab_group": group}
+
+@app.get("/user/{user_id}/personalization")
+def get_personalization(user_id: str):
+    if not recommender.is_loaded:
+        raise HTTPException(503, "model not loaded yet")
+    score = recommender.get_personalization_score(user_id)
+    return {"user_id": user_id, **score}
+
+
+@app.get("/metrics/personalization")
+def personalization_distribution():
+    """
+    Returns personalization score distribution
+    across all users — for dashboard visualization
+    """
+    if not recommender.is_loaded:
+        raise HTTPException(503, "model not loaded yet")
+
+    sample_users = list(recommender.user_cache.keys())[:500]
+    scores = []
+    for uid in sample_users:
+        s = recommender.get_personalization_score(uid)
+        scores.append(s["score"])
+
+    scores_arr = np.array(scores)
+    return {
+        "mean":   round(float(np.mean(scores_arr)),  2),
+        "median": round(float(np.median(scores_arr)), 2),
+        "min":    round(float(np.min(scores_arr)),   2),
+        "max":    round(float(np.max(scores_arr)),   2),
+        "buckets": {
+            "new_user":    int(np.sum(scores_arr < 20)),
+            "learning":    int(np.sum((scores_arr >= 20) &
+                                      (scores_arr < 50))),
+            "personalized":int(np.sum((scores_arr >= 50) &
+                                      (scores_arr < 80))),
+            "highly":      int(np.sum(scores_arr >= 80)),
+        }
+    }
