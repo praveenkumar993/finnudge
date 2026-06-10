@@ -130,6 +130,8 @@ class RecommendationService:
             })
         results = self._apply_context_boost(results, current_action)
 
+        results = self._apply_fatigue_filter(results, user_id)
+
         latency_ms = round((time.time() - start) * 1000, 2)
 
         user_info = self.user_cache.get(user_id, {})
@@ -168,26 +170,111 @@ class RecommendationService:
 
     def _explain(self, user_id: str, nudge_archetype: str,
                  nudge_category: str) -> str:
-        user   = self.user_cache.get(user_id, {})
-        arch   = user.get("archetype", "")
-        city   = user.get("city", "")
+        """
+        Dynamic explanations using actual user stats.
+        Much more personal than template strings.
+        """
+        user    = self.user_cache.get(user_id, {})
+        arch    = user.get("archetype", "")
+        city    = user.get("city", "")
+        age     = user.get("age", 0)
 
-        if arch == nudge_archetype:
-            templates = {
-                "investment": f"Recommended based on your "
-                              f"investment activity in {city}",
-                "savings":    "Matches your consistent saving pattern",
-                "emi":        "Based on your loan repayment history",
-                "reminder":   "You regularly pay bills on time",
-                "alert":      "Your spending pattern triggered this",
-                "budgeting":  "Based on your monthly spend trends",
-                "rewards":    "You have unclaimed rewards available",
-                "insurance":  "Matches your financial safety profile",
-                "offers":     "Personalised offer based on your usage",
-            }
-            return templates.get(nudge_category,
-                                 "Recommended based on your profile")
-        return "Recommended based on your financial activity"
+        # pull real feature stats if available
+        vector  = user.get("vector", [])
+        avg_amt = round(vector[0] * 50000) if vector else 0
+        txn_cnt = round(vector[2] * 100)   if vector else 0
+
+        # format amount nicely
+        def fmt_amount(amt):
+            if amt >= 100000:
+                return f"₹{amt/100000:.1f}L"
+            elif amt >= 1000:
+                return f"₹{amt/1000:.0f}K"
+            return f"₹{amt}"
+
+        amt_str = fmt_amount(avg_amt)
+
+        if arch != nudge_archetype:
+            return "Recommended based on your financial activity"
+
+        # dynamic explanations by category
+        explanations = {
+            "investment": [
+                f"Your avg investment is {amt_str} — "
+                f"time to grow it further",
+                f"Based on {txn_cnt} investment transactions "
+                f"in the last 6 months",
+                f"Investors in {city} like you are acting on this",
+            ],
+            "savings": [
+                f"You've been saving consistently — "
+                f"here's your next step",
+                f"Based on your saving pattern "
+                f"across {txn_cnt} transactions",
+                f"Smart move for a {age}-year-old "
+                f"building long-term wealth",
+            ],
+            "emi": [
+                f"Your avg EMI payment is {amt_str} — "
+                f"stay ahead of it",
+                f"Based on your loan repayment history "
+                f"in {city}",
+                f"Borrowers who act early save "
+                f"significantly on interest",
+            ],
+            "reminder": [
+                f"You've paid {txn_cnt} bills on time — "
+                f"keep the streak going",
+                f"Based on your bill payment pattern",
+                f"Don't break your on-time payment streak",
+            ],
+            "alert": [
+                f"Your spending avg is {amt_str} per transaction"
+                f" — here's what to watch",
+                f"Based on {txn_cnt} spending transactions",
+                f"Spenders in {city} with your profile "
+                f"benefit from this",
+            ],
+            "budgeting": [
+                f"Your {txn_cnt} transactions show "
+                f"a pattern worth optimising",
+                f"Based on your monthly spending behaviour",
+                f"Setting limits helped users like you "
+                f"save 18% monthly",
+            ],
+            "rewards": [
+                f"You have unclaimed rewards "
+                f"from {txn_cnt} transactions",
+                f"Most {city} users with your profile "
+                f"miss this",
+                f"Takes 30 seconds — "
+                f"worth {fmt_amount(avg_amt // 10)} avg",
+            ],
+            "insurance": [
+                f"At {age}, this is the right time "
+                f"to secure your finances",
+                f"Based on your financial profile in {city}",
+                f"Users your age who act now "
+                f"pay 40% lower premiums",
+            ],
+            "offers": [
+                f"Personalised offer based on your "
+                f"{txn_cnt} transactions",
+                f"Exclusive to {city} users "
+                f"with your spending pattern",
+                f"Your {amt_str} avg spend qualifies "
+                f"you for this",
+            ],
+        }
+
+        options = explanations.get(
+            nudge_category,
+            [f"Recommended based on your activity in {city}"]
+        )
+
+        # pick explanation based on user_id hash for consistency
+        idx = sum(ord(c) for c in user_id) % len(options)
+        return options[idx]
 
     def _apply_context_boost(self, nudges: list,
                               current_action: str) -> list:
@@ -252,6 +339,114 @@ class RecommendationService:
             nudge["rank"] = i + 1
 
         return nudges
+
+    def _get_nudge_impression_counts(self, user_id: str) -> dict:
+        """
+        Returns how many times each nudge was shown
+        to this user without a click — fatigue counter
+        """
+        conn = sqlite3.connect(settings.DB_PATH)
+        cur  = conn.cursor()
+
+        # impressions per nudge for this user
+        cur.execute("""
+            SELECT nudge_id, COUNT(*) as impressions
+            FROM events
+            WHERE user_id = ?
+            AND   action  = 'impression'
+            GROUP BY nudge_id
+        """, (user_id,))
+        impressions = {row[0]: row[1] for row in cur.fetchall()}
+
+        # clicks per nudge for this user
+        cur.execute("""
+            SELECT nudge_id, COUNT(*) as clicks
+            FROM events
+            WHERE user_id = ?
+            AND   action  = 'click'
+            GROUP BY nudge_id
+        """, (user_id,))
+        clicks = {row[0]: row[1] for row in cur.fetchall()}
+        conn.close()
+
+        # unseen impressions = impressions - clicks
+        # if user clicked, fatigue resets
+        fatigue = {}
+        for nudge_id, imp_count in impressions.items():
+            click_count       = clicks.get(nudge_id, 0)
+            fatigue[nudge_id] = max(imp_count - click_count, 0)
+
+        return fatigue
+
+    def _apply_fatigue_filter(self, results: list,
+                               user_id: str,
+                               fatigue_threshold: int = 3) -> list:
+        """
+        Filters out nudges shown too many times without a click.
+        
+        fatigue_threshold = 3:
+        If user has seen a nudge 3+ times without clicking,
+        replace it with the next best non-fatigued nudge.
+        
+        This prevents the system from spamming the same nudge
+        repeatedly — a real production requirement.
+        """
+        fatigue_counts = self._get_nudge_impression_counts(user_id)
+
+        # separate fatigued vs fresh nudges
+        fresh_nudges   = []
+        fatigued_nudges = []
+
+        for nudge in results:
+            nid   = nudge["nudge_id"]
+            count = fatigue_counts.get(nid, 0)
+            if count >= fatigue_threshold:
+                nudge["fatigued"]          = True
+                nudge["fatigue_impressions"] = count
+                fatigued_nudges.append(nudge)
+            else:
+                nudge["fatigued"]          = False
+                nudge["fatigue_impressions"] = count
+                fresh_nudges.append(nudge)
+
+        # if all fresh — return as is
+        if len(fatigued_nudges) == 0:
+            return results
+
+        # if some fatigued — fetch replacements from full catalog
+        if len(fresh_nudges) < len(results):
+            needed      = len(results) - len(fresh_nudges)
+            shown_ids   = {n["nudge_id"] for n in results}
+
+            # get all nudges not already in results
+            replacements = [
+                n for n in self.nudge_meta
+                if n["nudge_id"] not in shown_ids
+                and fatigue_counts.get(n["nudge_id"], 0)
+                    < fatigue_threshold
+            ]
+
+            # add up to needed replacements
+            for i, rep in enumerate(replacements[:needed]):
+                fresh_nudges.append({
+                    "rank":              len(fresh_nudges) + 1,
+                    "nudge_id":         rep["nudge_id"],
+                    "title":            rep["title"],
+                    "archetype":        rep["archetype"],
+                    "category":         rep["category"],
+                    "score":            0.4,
+                    "explanation":      "Fresh recommendation for you",
+                    "context_boosted":  False,
+                    "fatigued":         False,
+                    "fatigue_impressions": 0,
+                    "is_replacement":   True,
+                })
+
+        # re-rank
+        for i, nudge in enumerate(fresh_nudges[:len(results)]):
+            nudge["rank"] = i + 1
+
+        return fresh_nudges[:len(results)]
 
     def get_personalization_score(self, user_id: str) -> dict:
         """

@@ -88,9 +88,13 @@ def recommend(req: RecommendRequest):
             "source":     "control_random",
         }
 
-    ab_testing.log_event(
-        req.user_id, "none", "impression", ab_group
-    )
+    for nudge in result.get("nudges", []):
+        ab_testing.log_event(
+            req.user_id,
+            nudge["nudge_id"],
+            "impression",
+            ab_group
+        )
     result["ab_group"] = ab_group
     return result
 
