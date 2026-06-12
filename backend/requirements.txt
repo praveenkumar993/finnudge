@@ -4,7 +4,7 @@ pydantic==2.7.1
 python-dotenv==1.0.1
 sqlalchemy==2.0.30
 aiosqlite==0.20.0
-torch==2.3.0
+torch==2.3.0+cpu
 faiss-cpu==1.8.0
 river==0.21.0
 scikit-learn==1.4.2

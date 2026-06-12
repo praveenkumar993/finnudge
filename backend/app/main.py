@@ -31,6 +31,19 @@ app.add_middleware(
 # ── startup ──────────────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def startup():
+    import os
+    import subprocess
+
+    # generate data if not present (first deploy)
+    if not os.path.exists("data/processed/users.json"):
+        print("generating data for first deploy...")
+        subprocess.run(["python", "scripts/generate_users.py"])
+        subprocess.run(["python", "scripts/feature_engineering.py"])
+        subprocess.run(["python", "scripts/build_nudge_features.py"])
+        subprocess.run(["python", "scripts/train_model.py"])
+        subprocess.run(["python", "scripts/build_faiss_index.py"])
+        print("data generation complete")
+
     recommender.load()
 
 

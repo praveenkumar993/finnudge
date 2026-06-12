@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+.git/
+.gitignore
+frontend/node_modules/
+frontend/.env
+*.pt
+notebooks/
